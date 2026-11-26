@@ -16,6 +16,7 @@ use running::{
 };
 use sysinfo::open_ms_settings;
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use ui::{DockContextMenu, HitTarget, UiState, ViewMode};
 use windows::core::PCWSTR;
@@ -54,9 +55,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const WM_APP_APPS_LOADED: u32 = 0x8000 + 1;
+const WM_APP_RUNNING_LOADED: u32 = 0x8000 + 2;
 const TIMER_ANIM_ID: usize = 1;
 const TIMER_STATUS_ID: usize = 2;
 const HOTKEY_TOGGLE_HUB: i32 = 1001;
+
+static RUNNING_SCAN_BUSY: AtomicBool = AtomicBool::new(false);
 
 struct AppCtx {
     hwnd: HWND,
@@ -376,6 +380,30 @@ fn spawn_app_scan(hwnd: HWND) {
     });
 }
 
+fn spawn_running_scan(hwnd: HWND, known: Vec<String>) {
+    if RUNNING_SCAN_BUSY
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+    let hwnd_val = hwnd.0 as isize;
+    std::thread::spawn(move || {
+        let list = enumerate_running_windows(HWND(hwnd_val as *mut _), &known);
+        let boxed = Box::new(list);
+        let ptr = Box::into_raw(boxed) as isize;
+        unsafe {
+            let _ = PostMessageW(
+                HWND(hwnd_val as *mut _),
+                WM_APP_RUNNING_LOADED,
+                WPARAM(0),
+                LPARAM(ptr),
+            );
+        }
+        RUNNING_SCAN_BUSY.store(false, Ordering::SeqCst);
+    });
+}
+
 unsafe fn start_anim_if_needed(ctx: &mut AppCtx) {
     if !ctx.anim_running {
         ctx.anim_running = true;
@@ -528,6 +556,8 @@ unsafe extern "system" fn wnd_proc(
                         })
                         .collect();
                     ctx.ui.set_apps(entries);
+                    let known: Vec<String> = ctx.ui.apps.iter().map(|a| a.name_lower.clone()).collect();
+                    spawn_running_scan(hwnd, known);
                     if ctx.ui.mode == ViewMode::Dock {
                         pending_pos = Some(prepare_switch_mode(ctx, false));
                     } else {
@@ -535,16 +565,24 @@ unsafe extern "system" fn wnd_proc(
                     }
                 });
                 apply_window_pos(pending_pos);
-            } else if wparam.0 == TIMER_STATUS_ID {
+            }
+            LRESULT(0)
+        }
+        WM_APP_RUNNING_LOADED => {
+            let ptr = lparam.0 as *mut Vec<running::RunningWindow>;
+            if !ptr.is_null() {
+                let list = *Box::from_raw(ptr);
+                let mut pending_pos = None;
                 with_ctx(|ctx| {
-                    ctx.ui.sys_status.refresh(hwnd);
-                    let known: Vec<String> = ctx.ui.apps.iter().map(|a| a.name_lower.clone()).collect();
-                    let list = enumerate_running_windows(ctx.hwnd, &known);
+                    let prev_w = ctx.ui.dock_win_w;
                     ctx.ui.set_running(list, &ctx.gpu);
-                    if ctx.ui.mode == ViewMode::Dock {
+                    if ctx.ui.mode == ViewMode::Dock && (ctx.ui.dock_win_w - prev_w).abs() > 1.0 {
+                        pending_pos = Some(prepare_switch_mode(ctx, false));
+                    } else if !ctx.anim_running {
                         ctx.ui.render(&ctx.gpu);
                     }
                 });
+                apply_window_pos(pending_pos);
             }
             LRESULT(0)
         }
@@ -559,16 +597,6 @@ unsafe extern "system" fn wnd_proc(
                     }
                 });
                 apply_window_pos(pending_pos);
-            } else if wparam.0 == TIMER_STATUS_ID {
-                with_ctx(|ctx| {
-                    ctx.ui.sys_status.refresh(hwnd);
-                    let known: Vec<String> = ctx.ui.apps.iter().map(|a| a.name_lower.clone()).collect();
-                    let list = enumerate_running_windows(ctx.hwnd, &known);
-                    ctx.ui.set_running(list, &ctx.gpu);
-                    if ctx.ui.mode == ViewMode::Dock {
-                        ctx.ui.render(&ctx.gpu);
-                    }
-                });
             }
             LRESULT(0)
         }
@@ -623,7 +651,13 @@ unsafe extern "system" fn wnd_proc(
                         pending_pos = Some(prepare_switch_mode(ctx, false));
                     }
                 }
-                start_anim_if_needed(ctx);
+                if !ctx.anim_running {
+                    start_anim_if_needed(ctx);
+                    let _ = ctx.ui.tick_animations(0.012);
+                    ctx.ui.render(&ctx.gpu);
+                } else {
+                    start_anim_if_needed(ctx);
+                }
             });
             apply_window_pos(pending_pos);
             LRESULT(0)
@@ -637,7 +671,13 @@ unsafe extern "system" fn wnd_proc(
                     ctx.ui.dock_hover_sub = None;
                     pending_pos = Some(prepare_switch_mode(ctx, false));
                 }
-                start_anim_if_needed(ctx);
+                if !ctx.anim_running {
+                    start_anim_if_needed(ctx);
+                    let _ = ctx.ui.tick_animations(0.012);
+                    ctx.ui.render(&ctx.gpu);
+                } else {
+                    start_anim_if_needed(ctx);
+                }
             });
             apply_window_pos(pending_pos);
             LRESULT(0)
@@ -669,14 +709,26 @@ unsafe extern "system" fn wnd_proc(
                         } else {
                             ctx.ui.launch_app(idx);
                         }
-                        start_anim_if_needed(ctx);
+                        if !ctx.anim_running {
+                    start_anim_if_needed(ctx);
+                    let _ = ctx.ui.tick_animations(0.012);
+                    ctx.ui.render(&ctx.gpu);
+                } else {
+                    start_anim_if_needed(ctx);
+                }
                         ctx.ui.render(&ctx.gpu);
                     }
                     HitTarget::DockRunning(r_idx) => {
                         if let Some(rw) = ctx.ui.running.get(r_idx) {
                             toggle_or_activate_window(rw.hwnd, rw.pid, &rw.exe_path);
                         }
-                        start_anim_if_needed(ctx);
+                        if !ctx.anim_running {
+                    start_anim_if_needed(ctx);
+                    let _ = ctx.ui.tick_animations(0.012);
+                    ctx.ui.render(&ctx.gpu);
+                } else {
+                    start_anim_if_needed(ctx);
+                }
                         ctx.ui.render(&ctx.gpu);
                     }
                     HitTarget::DockRefresh => should_rescan = true,
@@ -698,7 +750,13 @@ unsafe extern "system" fn wnd_proc(
                         ctx.ui.page = 0;
                         ctx.ui.apply_filter();
                         ctx.ui.trigger_page_anim(1.0);
-                        start_anim_if_needed(ctx);
+                        if !ctx.anim_running {
+                    start_anim_if_needed(ctx);
+                    let _ = ctx.ui.tick_animations(0.012);
+                    ctx.ui.render(&ctx.gpu);
+                } else {
+                    start_anim_if_needed(ctx);
+                }
                         ctx.ui.render(&ctx.gpu);
                     }
                     HitTarget::HubRunningApp(r_idx) => {
@@ -749,7 +807,13 @@ unsafe extern "system" fn wnd_proc(
                         let dir = if p >= ctx.ui.page { 1.0 } else { -1.0 };
                         ctx.ui.page = p;
                         ctx.ui.trigger_page_anim(dir);
-                        start_anim_if_needed(ctx);
+                        if !ctx.anim_running {
+                    start_anim_if_needed(ctx);
+                    let _ = ctx.ui.tick_animations(0.012);
+                    ctx.ui.render(&ctx.gpu);
+                } else {
+                    start_anim_if_needed(ctx);
+                }
                         ctx.ui.render(&ctx.gpu);
                     }
                     HitTarget::SetZoom(idx) => {
@@ -1074,12 +1138,24 @@ unsafe extern "system" fn wnd_proc(
                         if delta < 0 && ctx.ui.page + 1 < ctx.ui.total_pages {
                             ctx.ui.page += 1;
                             ctx.ui.trigger_page_anim(1.0);
-                            start_anim_if_needed(ctx);
+                            if !ctx.anim_running {
+                    start_anim_if_needed(ctx);
+                    let _ = ctx.ui.tick_animations(0.012);
+                    ctx.ui.render(&ctx.gpu);
+                } else {
+                    start_anim_if_needed(ctx);
+                }
                             ctx.ui.render(&ctx.gpu);
                         } else if delta > 0 && ctx.ui.page > 0 {
                             ctx.ui.page -= 1;
                             ctx.ui.trigger_page_anim(-1.0);
-                            start_anim_if_needed(ctx);
+                            if !ctx.anim_running {
+                    start_anim_if_needed(ctx);
+                    let _ = ctx.ui.tick_animations(0.012);
+                    ctx.ui.render(&ctx.gpu);
+                } else {
+                    start_anim_if_needed(ctx);
+                }
                             ctx.ui.render(&ctx.gpu);
                         }
                     }
@@ -1106,7 +1182,13 @@ unsafe extern "system" fn wnd_proc(
                             if ctx.ui.page > 0 {
                                 ctx.ui.page -= 1;
                                 ctx.ui.trigger_page_anim(-1.0);
-                                start_anim_if_needed(ctx);
+                                if !ctx.anim_running {
+                    start_anim_if_needed(ctx);
+                    let _ = ctx.ui.tick_animations(0.012);
+                    ctx.ui.render(&ctx.gpu);
+                } else {
+                    start_anim_if_needed(ctx);
+                }
                                 ctx.ui.render(&ctx.gpu);
                             }
                         }
@@ -1114,7 +1196,13 @@ unsafe extern "system" fn wnd_proc(
                             if ctx.ui.page + 1 < ctx.ui.total_pages {
                                 ctx.ui.page += 1;
                                 ctx.ui.trigger_page_anim(1.0);
-                                start_anim_if_needed(ctx);
+                                if !ctx.anim_running {
+                    start_anim_if_needed(ctx);
+                    let _ = ctx.ui.tick_animations(0.012);
+                    ctx.ui.render(&ctx.gpu);
+                } else {
+                    start_anim_if_needed(ctx);
+                }
                                 ctx.ui.render(&ctx.gpu);
                             }
                         }
@@ -1222,20 +1310,14 @@ unsafe extern "system" fn wnd_proc(
                 });
                 apply_window_pos(pending_pos);
             } else if wparam.0 == TIMER_STATUS_ID {
-                let mut pending_pos = None;
                 with_ctx(|ctx| {
                     ctx.ui.sys_status.refresh(hwnd);
                     let known: Vec<String> = ctx.ui.apps.iter().map(|a| a.name_lower.clone()).collect();
-                    let list = enumerate_running_windows(ctx.hwnd, &known);
-                    let prev_w = ctx.ui.dock_win_w;
-                    ctx.ui.set_running(list, &ctx.gpu);
-                    if ctx.ui.mode == ViewMode::Dock && (ctx.ui.dock_win_w - prev_w).abs() > 1.0 {
-                        pending_pos = Some(prepare_switch_mode(ctx, false));
-                    } else if ctx.ui.mode == ViewMode::Dock {
+                    spawn_running_scan(hwnd, known);
+                    if ctx.ui.mode == ViewMode::Dock && !ctx.anim_running {
                         ctx.ui.render(&ctx.gpu);
                     }
                 });
-                apply_window_pos(pending_pos);
             }
             LRESULT(0)
         }

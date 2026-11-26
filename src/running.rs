@@ -1,6 +1,5 @@
-use crate::apps::{extract_icon_bgra, RawIconData};
+use crate::apps::RawIconData;
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{BOOL, CloseHandle, HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::ID2D1Bitmap1;
@@ -226,8 +225,6 @@ pub fn enumerate_running_windows(self_hwnd: HWND, known_app_names: &[String]) ->
                                         existing.unread_count =
                                             existing.unread_count.max(unread_count);
                                     } else if !is_wechat_sub {
-                                        let raw_icon = extract_icon_bgra(Path::new(&exe_path))
-                                            .map(|d| RawIconDataPtr(std::sync::Arc::new(d)));
                                         order.push(group_key.clone());
                                         grouped.insert(
                                             group_key,
@@ -241,7 +238,7 @@ pub fn enumerate_running_windows(self_hwnd: HWND, known_app_names: &[String]) ->
                                                 sub_windows: subs,
                                                 app_icon_idx: None,
                                                 custom_bitmap: None,
-                                                raw_icon,
+                                                raw_icon: None,
                                             },
                                         );
                                     }

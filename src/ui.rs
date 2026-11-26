@@ -3,12 +3,13 @@ use crate::config::AppConfig;
 use crate::gpu::{point_f, rect_f, rgba, to_wide, GpuRenderer};
 use crate::running::RunningWindow;
 use crate::sysinfo::SystemStatus;
+use std::collections::HashMap;
 use std::path::Path;
 use windows::core::PCWSTR;
 use windows::Win32::Graphics::Direct2D::Common::{D2D1_GRADIENT_STOP, D2D_RECT_F};
 use windows::Win32::Graphics::Direct2D::{
-    ID2D1RenderTarget, D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_EXTEND_MODE_CLAMP, D2D1_GAMMA_2_2,
-    D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES,
+    ID2D1Bitmap1, ID2D1RenderTarget, D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_EXTEND_MODE_CLAMP,
+    D2D1_GAMMA_2_2, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES,
     D2D1_ROUNDED_RECT,
 };
 use windows::Win32::Graphics::DirectWrite::{
@@ -110,6 +111,7 @@ pub struct UiState {
     pub config: AppConfig,
     pub apps: Vec<AppEntry>,
     pub running: Vec<RunningWindow>,
+    pub running_icon_cache: HashMap<String, ID2D1Bitmap1>,
     pub dock_indices: Vec<usize>,
     pub dock_running_extra: Vec<usize>,
     pub filtered_indices: Vec<usize>,
@@ -181,6 +183,7 @@ impl UiState {
             config,
             apps: Vec::new(),
             running: Vec::new(),
+            running_icon_cache: HashMap::new(),
             dock_indices: Vec::new(),
             dock_running_extra: Vec::new(),
             filtered_indices: Vec::new(),
@@ -387,9 +390,15 @@ impl UiState {
                 if !is_hidden && !self.dock_indices.contains(&idx) && extra.len() < 6 {
                     extra.push(r_idx);
                 }
+            } else if let Some(cached) = self.running_icon_cache.get(&rw.exe_path) {
+                rw.custom_bitmap = Some(cached.clone());
             } else if let Some(ref raw) = rw.raw_icon {
-                rw.custom_bitmap =
-                    gpu.create_bitmap_from_bgra(raw.0.width, raw.0.height, &raw.0.bgra_premul);
+                if let Some(bmp) =
+                    gpu.create_bitmap_from_bgra(raw.0.width, raw.0.height, &raw.0.bgra_premul)
+                {
+                    self.running_icon_cache.insert(rw.exe_path.clone(), bmp.clone());
+                    rw.custom_bitmap = Some(bmp);
+                }
             }
         }
         self.running = list;
@@ -775,7 +784,7 @@ impl UiState {
                         bmp,
                         Some(&ir),
                         1.0,
-                        D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+                        D2D1_INTERPOLATION_MODE_LINEAR,
                         None,
                         None,
                     );
@@ -844,7 +853,7 @@ impl UiState {
                             bmp,
                             Some(&ir),
                             1.0,
-                            D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+                            D2D1_INTERPOLATION_MODE_LINEAR,
                             None,
                             None,
                         );
@@ -1407,7 +1416,7 @@ impl UiState {
                     bmp,
                     Some(&ir),
                     1.0,
-                    D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+                    D2D1_INTERPOLATION_MODE_LINEAR,
                     None,
                     None,
                 );
@@ -1501,7 +1510,7 @@ impl UiState {
                         bmp,
                         Some(&ir),
                         1.0,
-                        D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+                        D2D1_INTERPOLATION_MODE_LINEAR,
                         None,
                         None,
                     );
@@ -1587,7 +1596,7 @@ impl UiState {
                         bmp,
                         Some(&ir),
                         self.page_anim.clamp(0.2, 1.0),
-                        D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+                        D2D1_INTERPOLATION_MODE_LINEAR,
                         None,
                         None,
                     );

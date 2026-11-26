@@ -267,8 +267,11 @@ fn classify_app(lower: &str, path: &Path) -> AppCategory {
 
 /// 从路径提取高清图标，并转换为 Direct2D 所需的预乘 Alpha BGRA32 像素
 pub unsafe fn extract_icon_bgra(path: &Path) -> Option<RawIconData> {
-    let wide: Vec<u16> = path
-        .to_string_lossy()
+    let path_str = path.to_string_lossy();
+    if path_str.starts_with("\\\\") {
+        return None;
+    }
+    let wide: Vec<u16> = path_str
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();

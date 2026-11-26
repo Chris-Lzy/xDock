@@ -224,9 +224,9 @@ impl GpuRenderer {
             .ok()
     }
 
-    pub unsafe fn present(&self, vsync: bool) -> Result<()> {
-        let sync = if vsync { 1 } else { 0 };
-        self.swap_chain.Present(sync, DXGI_PRESENT(0)).ok()?;
+    pub unsafe fn present(&self, _vsync: bool) -> Result<()> {
+        // 使用无阻塞 Present(0, 0) 交给 DirectComposition 合成，避免 VSync 阻塞 Win32 消息循环导致鼠标移动掉帧
+        self.swap_chain.Present(0, DXGI_PRESENT(0)).ok()?;
         Ok(())
     }
 }
